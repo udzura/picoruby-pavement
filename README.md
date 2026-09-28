@@ -26,6 +26,15 @@ class Application < Pavement::Base
     call { |name:| "Hello, #{name}!" }
   end
 
+  tool "sum" do
+    input do
+      integer :left, required: true
+      integer :right, required: true
+    end
+    output { integer :sum, required: true }
+    call { |left:, right:| { sum: left + right } }
+  end
+
   resource "demo://about" do
     name "About this server"
     mime_type "text/plain"
@@ -42,6 +51,15 @@ Tool `call` and resource `read` blocks run on a fresh application instance for
 each request. Instance methods can access the current Rack hash through `env`.
 Inputs support `string`, `integer`, and `boolean` with `required`, `default`,
 and `description` options.
+
+`output` is optional and uses the same field types. A tool with `output` must
+return a Hash whose keys are strings or symbols. Pavement checks required and
+unknown fields and their value types. It publishes the schema as `outputSchema`
+and returns the normalized Hash as `structuredContent`, with JSON text in
+`content` for clients that read text only. An invalid result becomes a tool
+error. For 2025-03-26 clients, Pavement sends only the JSON text because that
+revision has no structured output fields. Without `output`, the return value
+is converted to text as before.
 
 The app responds on `POST /mcp`. It uses the 2026-07-28 MCP protocol and accepts
 legacy 2025-03-26, 2025-06-18, and 2025-11-25 Streamable HTTP handshakes. It

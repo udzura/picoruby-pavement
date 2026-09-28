@@ -3,6 +3,7 @@ module Pavement
   LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26"]
 
   class InvalidInput < StandardError; end
+  class InvalidOutput < StandardError; end
 
   class Schema
     def initialize
@@ -65,6 +66,32 @@ module Pavement
       end
       values
     end
+
+    def validate_output(value)
+      raise InvalidOutput, "output must be an object" unless value.is_a?(Hash)
+      normalized = {}
+      value.each do |key, item|
+        raise InvalidOutput, "output keys must be strings or symbols" unless key.is_a?(String) || key.is_a?(Symbol)
+        name = key.to_s
+        raise InvalidOutput, "unknown output: #{name}" unless @fields.key?(name)
+        raise InvalidOutput, "duplicate output: #{name}" if normalized.key?(name)
+        normalized[name] = item
+      end
+      @fields.each do |name, field|
+        unless normalized.key?(name)
+          raise InvalidOutput, "missing output: #{name}" if field["required"]
+          next
+        end
+        item = normalized[name]
+        valid = case field["type"]
+                when "string" then item.is_a?(String)
+                when "integer" then item.is_a?(Integer)
+                when "boolean" then item == true || item == false
+                end
+        raise InvalidOutput, "#{name} must be #{field['type']}" unless valid
+      end
+      normalized
+    end
   end
 
   class Tool
@@ -85,6 +112,12 @@ module Pavement
       @schema.instance_eval(&block)
     end
 
+    def output(&block)
+      raise ArgumentError, "duplicate output declaration for #{@name}" if @output_schema
+      @output_schema = Schema.new
+      @output_schema.instance_eval(&block)
+    end
+
     def call(&block)
       @handler = block
     end
@@ -92,7 +125,16 @@ module Pavement
     def definition
       result = { "name" => @name, "inputSchema" => @schema.json_schema }
       result["description"] = @description if @description
+      result["outputSchema"] = @output_schema.json_schema if @output_schema
       result
+    end
+
+    def structured_output?
+      !@output_schema.nil?
+    end
+
+    def validate_output(value)
+      @output_schema.validate_output(value)
     end
 
     def invoke(arguments, context)
@@ -228,9 +270,16 @@ module Pavement
                  return :not_found unless tool
                  begin
                    value = tool.invoke(params["arguments"] || {}, context)
-                   { "content" => [{ "type" => "text", "text" => value.to_s }], "isError" => false }
+                   if tool.structured_output?
+                     structured = tool.validate_output(value)
+                     { "content" => [{ "type" => "text", "text" => JSON.generate(structured) }], "structuredContent" => structured, "isError" => false }
+                   else
+                     { "content" => [{ "type" => "text", "text" => value.to_s }], "isError" => false }
+                   end
                  rescue InvalidInput
                    raise
+                 rescue InvalidOutput
+                   { "content" => [{ "type" => "text", "text" => "Tool output did not match its schema" }], "isError" => true }
                  rescue => e
                    { "content" => [{ "type" => "text", "text" => "Tool execution failed" }], "isError" => true }
                  end
@@ -272,6 +321,10 @@ module Pavement
       result = method == "ping" ? {} : dispatch(method, params, context)
       return rpc_error(404, id, -32601, "Method not found") if result == :method_not_found
       return rpc_error(400, id, -32602, "Unknown tool or resource") if result == :not_found
+      if version == "2025-03-26"
+        result["tools"].each { |tool| tool.delete("outputSchema") } if method == "tools/list"
+        result.delete("structuredContent") if method == "tools/call"
+      end
       result.delete("resultType")
       result.delete("_meta")
       result.delete("ttlMs")
