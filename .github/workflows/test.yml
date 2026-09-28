@@ -1,0 +1,27 @@
+name: Test
+
+"on": 
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+
+permissions:
+  contents: read
+
+jobs:
+  ruby:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ruby: ["4.0"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - name: Check syntax
+        run: ruby -c mrbgem.rake && ruby -c mrblib/pavement.rb
+      - name: Test Pavement
+        run: ruby test/pavement_env.rb

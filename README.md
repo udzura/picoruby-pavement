@@ -72,3 +72,5 @@ only `localhost` and `127.0.0.1` Host headers are accepted. Set
 ```sh
 ruby test/pavement_env.rb
 ```
+
+GitHub Actions runs this test and checks Ruby syntax on Ruby 3.2 and 4.0.
