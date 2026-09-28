@@ -1,5 +1,8 @@
 # picoruby-pavement
 
+> “You call to me.”
+> — Pavement, [“Nigel”](https://pavement.bandcamp.com/track/nigel-unreleased-song)
+
 Pavement is a small Ruby DSL for MCP servers on PicoRuby. It handles JSON-RPC
 requests over Streamable HTTP and exposes tools and resources through a Rack
 application. The gem depends on `mruby-jsonrs` for JSON parsing and generation.
