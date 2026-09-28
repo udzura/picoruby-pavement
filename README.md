@@ -64,9 +64,29 @@ error. For 2025-03-26 clients, Pavement sends only the JSON text because that
 revision has no structured output fields. Without `output`, the return value
 is converted to text as before.
 
+For tools that report progress, declare `enable :progress` and call the
+`progress` helper from the tool block:
+
+```ruby
+tool "import" do
+  enable :progress
+  call do
+    progress(1, total: 2, message: "Reading")
+    progress(2, total: 2, message: "Done")
+    "Imported"
+  end
+end
+```
+
+When the client supplies a `progressToken`, Pavement sends the notifications
+and final tool result on one SSE response. Without a token, the helper does
+nothing and the tool returns JSON as usual. Progress values must increase.
+The helper works with both 2026-07-28 and supported legacy requests.
+
 The app responds on `POST /mcp`. It uses the 2026-07-28 MCP protocol and accepts
 legacy 2025-03-26, 2025-06-18, and 2025-11-25 Streamable HTTP handshakes. It
-returns JSON responses; SSE and subscriptions are not implemented. By default,
+returns JSON responses unless a declared tool reports progress; subscriptions
+are not implemented. By default,
 only `localhost` and `127.0.0.1` Host headers are accepted. Set
 `MCP_ALLOWED_HOSTS` to a comma-separated list for other hosts.
 
@@ -74,6 +94,7 @@ only `localhost` and `127.0.0.1` Host headers are accepted. Set
 
 ```sh
 ruby test/pavement_env.rb
+ruby test/pavement_progress.rb
 ```
 
-GitHub Actions runs this test and checks Ruby syntax on Ruby 3.2 and 4.0.
+GitHub Actions runs these tests and checks Ruby syntax on Ruby 4.0.

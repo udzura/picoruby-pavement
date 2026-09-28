@@ -95,6 +95,8 @@ module Pavement
   end
 
   class Tool
+    SUPPORTED_FEATURES = [:progress].freeze
+
     attr_reader :name
 
     def initialize(name, &block)
@@ -120,6 +122,19 @@ module Pavement
 
     def call(&block)
       @handler = block
+    end
+
+    def enable(*features)
+      raise ArgumentError, "enable needs at least one feature" if features.empty?
+      features.each do |feature|
+        raise ArgumentError, "unsupported tool feature: #{feature.inspect}" unless SUPPORTED_FEATURES.include?(feature)
+      end
+      @enabled_features ||= {}
+      features.each { |feature| @enabled_features[feature] = true }
+    end
+
+    def enabled?(feature)
+      @enabled_features.is_a?(Hash) && @enabled_features[feature] == true
     end
 
     def definition
@@ -247,6 +262,11 @@ module Pavement
       end
       return rpc_error(400, id, -32602, "name or uri is required") if (method == "tools/call" || method == "resources/read") && !name.is_a?(String)
 
+      tool = @tools[name] if method == "tools/call"
+      if tool && tool.enabled?(:progress) && progress_token?(meta["progressToken"]) && defined?(Cloudflare::CustomReadableStream)
+        return stream_tool_call(env, id, params, context, meta["progressToken"])
+      end
+
       result = dispatch(method, params, context)
       return rpc_error(404, id, -32601, "Method not found") if result == :method_not_found
       return rpc_error(400, id, -32602, "Unknown tool or resource") if result == :not_found
@@ -303,6 +323,34 @@ module Pavement
       { "tools" => {}, "resources" => {} }
     end
 
+    def progress_token?(value)
+      value.is_a?(String) || value.is_a?(Integer)
+    end
+
+    def stream_tool_call(env, id, params, context, token, legacy_version = nil)
+      stream = Cloudflare::CustomReadableStream.new do |writer|
+        context.__with_progress(writer, token) do
+          message = begin
+            result = dispatch("tools/call", params, context)
+            result = legacy_result("tools/call", result, legacy_version) if legacy_version
+            { "jsonrpc" => "2.0", "id" => id, "result" => result }
+          rescue InvalidInput => e
+            { "jsonrpc" => "2.0", "id" => id, "error" => { "code" => -32602, "message" => e.message } }
+          rescue
+            { "jsonrpc" => "2.0", "id" => id, "error" => { "code" => -32603, "message" => "Internal error" } }
+          end
+          writer.write(sse_message(message))
+        end
+      end
+      stream.on_error { "data: #{JSON.generate({ "jsonrpc" => "2.0", "id" => id, "error" => { "code" => -32603, "message" => "Internal error" } })}\n\n" }
+      env["cloudflare.hijack"] = stream.finish
+      [200, { "content-type" => "text/event-stream", "cache-control" => "no-store", "x-accel-buffering" => "no" }, []]
+    end
+
+    def sse_message(message)
+      "data: #{JSON.generate(message)}\n\n"
+    end
+
     def modern_metadata?(params)
       meta = params["_meta"]
       meta.is_a?(Hash) && meta.key?("io.modelcontextprotocol/protocolVersion")
@@ -318,9 +366,19 @@ module Pavement
     def legacy_request(id, method, params, version, context)
       version ||= LEGACY_VERSIONS.last
       return rpc_error(400, id, -32602, "Unsupported legacy protocol version") unless LEGACY_VERSIONS.include?(version)
+      tool = @tools[params["name"]] if method == "tools/call"
+      token = params["_meta"].is_a?(Hash) && params["_meta"]["progressToken"]
+      if tool && tool.enabled?(:progress) && progress_token?(token) && defined?(Cloudflare::CustomReadableStream)
+        return stream_tool_call(context.env, id, params, context, token, version)
+      end
       result = method == "ping" ? {} : dispatch(method, params, context)
       return rpc_error(404, id, -32601, "Method not found") if result == :method_not_found
       return rpc_error(400, id, -32602, "Unknown tool or resource") if result == :not_found
+      result = legacy_result(method, result, version)
+      response(200, { "jsonrpc" => "2.0", "id" => id, "result" => result })
+    end
+
+    def legacy_result(method, result, version)
       if version == "2025-03-26"
         result["tools"].each { |tool| tool.delete("outputSchema") } if method == "tools/list"
         result.delete("structuredContent") if method == "tools/call"
@@ -329,7 +387,7 @@ module Pavement
       result.delete("_meta")
       result.delete("ttlMs")
       result.delete("cacheScope")
-      response(200, { "jsonrpc" => "2.0", "id" => id, "result" => result })
+      result
     end
 
     def header_value(value)
@@ -361,6 +419,28 @@ module Pavement
 
     def call
       self.class.application.call(env, self)
+    end
+
+    def progress(value, total: nil, message: nil)
+      return false unless @progress_writer
+      raise ArgumentError, "progress must increase" unless value.is_a?(Numeric) && (@last_progress.nil? || value > @last_progress)
+      raise ArgumentError, "total must be numeric" unless total.nil? || total.is_a?(Numeric)
+      raise ArgumentError, "message must be a String" unless message.nil? || message.is_a?(String)
+      params = { "progressToken" => @progress_token, "progress" => value }
+      params["total"] = total unless total.nil?
+      params["message"] = message unless message.nil?
+      @progress_writer.write("data: #{JSON.generate({ "jsonrpc" => "2.0", "method" => "notifications/progress", "params" => params })}\n\n")
+      @last_progress = value
+      true
+    end
+
+    def __with_progress(writer, token)
+      @progress_writer = writer
+      @progress_token = token
+      @last_progress = nil
+      yield
+    ensure
+      @progress_writer = @progress_token = @last_progress = nil
     end
 
     def self.tool(name, &block)

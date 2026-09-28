@@ -24,4 +24,4 @@ jobs:
       - name: Check syntax
         run: ruby -c mrbgem.rake && ruby -c mrblib/pavement.rb
       - name: Test Pavement
-        run: ruby test/pavement_env.rb
+        run: ruby test/pavement_env.rb && ruby test/pavement_progress.rb
