@@ -16,6 +16,8 @@ conf.gem github: "udzura/picoruby-pavement"
 During local development, use `conf.gem gemdir: "/path/to/picoruby-pavement"`.
 The host runtime must provide Rack request handling and a `rack.input` stream.
 The [demo-tape](https://github.com/udzura/demo-tape) Worker is an example.
+For a complete project using this checkout, see
+[`examples/hello-worker`](examples/hello-worker).
 
 ## Define an application
 
