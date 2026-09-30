@@ -4,6 +4,7 @@ module Pavement
 
   class InvalidInput < StandardError; end
   class InvalidOutput < StandardError; end
+  class Cancelled < StandardError; end
 
   class Schema
     def initialize
@@ -95,7 +96,7 @@ module Pavement
   end
 
   class Tool
-    SUPPORTED_FEATURES = [:progress].freeze
+    SUPPORTED_FEATURES = [:progress, :cancellation].freeze
 
     attr_reader :name
 
@@ -263,8 +264,9 @@ module Pavement
       return rpc_error(400, id, -32602, "name or uri is required") if (method == "tools/call" || method == "resources/read") && !name.is_a?(String)
 
       tool = @tools[name] if method == "tools/call"
-      if tool && tool.enabled?(:progress) && progress_token?(meta["progressToken"]) && defined?(Cloudflare::CustomReadableStream)
-        return stream_tool_call(env, id, params, context, meta["progressToken"])
+      token = meta["progressToken"] if tool && tool.enabled?(:progress) && progress_token?(meta["progressToken"])
+      if tool && (tool.enabled?(:cancellation) || !token.nil?) && defined?(Cloudflare::CustomReadableStream)
+        return stream_tool_call(env, id, params, context, token)
       end
 
       result = dispatch(method, params, context)
@@ -296,8 +298,8 @@ module Pavement
                    else
                      { "content" => [{ "type" => "text", "text" => value.to_s }], "isError" => false }
                    end
-                 rescue InvalidInput
-                   raise
+                 rescue InvalidInput, Cancelled => e
+                   raise e
                  rescue InvalidOutput
                    { "content" => [{ "type" => "text", "text" => "Tool output did not match its schema" }], "isError" => true }
                  rescue => e
@@ -334,13 +336,18 @@ module Pavement
             result = dispatch("tools/call", params, context)
             result = legacy_result("tools/call", result, legacy_version) if legacy_version
             { "jsonrpc" => "2.0", "id" => id, "result" => result }
+          rescue Cancelled => e
+            raise e
           rescue InvalidInput => e
             { "jsonrpc" => "2.0", "id" => id, "error" => { "code" => -32602, "message" => e.message } }
           rescue
             { "jsonrpc" => "2.0", "id" => id, "error" => { "code" => -32603, "message" => "Internal error" } }
           end
-          writer.write(sse_message(message))
+          context.__write_stream(sse_message(message))
         end
+      rescue Cancelled
+        # The response stream is gone; do not send a result or an error.
+        nil
       end
       stream.on_error { "data: #{JSON.generate({ "jsonrpc" => "2.0", "id" => id, "error" => { "code" => -32603, "message" => "Internal error" } })}\n\n" }
       env["cloudflare.hijack"] = stream.finish
@@ -367,8 +374,9 @@ module Pavement
       version ||= LEGACY_VERSIONS.last
       return rpc_error(400, id, -32602, "Unsupported legacy protocol version") unless LEGACY_VERSIONS.include?(version)
       tool = @tools[params["name"]] if method == "tools/call"
-      token = params["_meta"].is_a?(Hash) && params["_meta"]["progressToken"]
-      if tool && tool.enabled?(:progress) && progress_token?(token) && defined?(Cloudflare::CustomReadableStream)
+      value = params["_meta"].is_a?(Hash) && params["_meta"]["progressToken"]
+      token = value if tool && tool.enabled?(:progress) && progress_token?(value)
+      if tool && (tool.enabled?(:cancellation) || !token.nil?) && defined?(Cloudflare::CustomReadableStream)
         return stream_tool_call(context.env, id, params, context, token, version)
       end
       result = method == "ping" ? {} : dispatch(method, params, context)
@@ -422,25 +430,54 @@ module Pavement
     end
 
     def progress(value, total: nil, message: nil)
-      return false unless @progress_writer
+      return false unless @progress_writer && !@progress_token.nil?
       raise ArgumentError, "progress must increase" unless value.is_a?(Numeric) && (@last_progress.nil? || value > @last_progress)
       raise ArgumentError, "total must be numeric" unless total.nil? || total.is_a?(Numeric)
       raise ArgumentError, "message must be a String" unless message.nil? || message.is_a?(String)
       params = { "progressToken" => @progress_token, "progress" => value }
       params["total"] = total unless total.nil?
       params["message"] = message unless message.nil?
-      @progress_writer.write("data: #{JSON.generate({ "jsonrpc" => "2.0", "method" => "notifications/progress", "params" => params })}\n\n")
+      __write_stream("data: #{JSON.generate({ "jsonrpc" => "2.0", "method" => "notifications/progress", "params" => params })}\n\n")
       @last_progress = value
       true
+    end
+
+    def cancelled?
+      return true if @cancelled
+      return false unless @progress_writer
+      begin
+        # An empty write checks the host stream without sending an MCP message.
+        __write_stream("")
+      rescue Cancelled
+        return true
+      end
+      false
+    end
+
+    def check_cancelled!
+      raise Cancelled, "MCP response stream is unavailable" if cancelled?
+      nil
+    end
+
+    def __write_stream(value)
+      raise Cancelled, "MCP response stream is unavailable" if @cancelled
+      begin
+        @progress_writer.write(value)
+      rescue
+        @cancelled = true
+        raise Cancelled, "MCP response stream is unavailable"
+      end
     end
 
     def __with_progress(writer, token)
       @progress_writer = writer
       @progress_token = token
       @last_progress = nil
+      @cancelled = false
       yield
     ensure
       @progress_writer = @progress_token = @last_progress = nil
+      @cancelled = false
     end
 
     def self.tool(name, &block)

@@ -85,10 +85,53 @@ and final tool result on one SSE response. Without a token, the helper does
 nothing and the tool returns JSON as usual. Progress values must increase.
 The helper works with both 2026-07-28 and supported legacy requests.
 
+## Cancellation
+
+For a long-running tool, declare `enable :cancellation` and check for a
+disconnected client between steps:
+
+```ruby
+tool "import" do
+  enable :cancellation
+  call do
+    check_cancelled!
+    records = fetch_records
+    check_cancelled!
+    save_records(records)
+    "Imported"
+  ensure
+    release_import_resources
+  end
+end
+```
+
+This feature uses an SSE response even without a `progressToken`, so the client
+can cancel by closing the response stream. It requires the host's
+`Cloudflare::CustomReadableStream` (Worker runtime 0.11.0 or later); without
+that stream API, the tool uses JSON and cancellation checks do nothing.
+`check_cancelled!` raises `Pavement::Cancelled` when the stream is unavailable.
+Pavement stops the tool without sending a final result or an error on the lost
+stream. Ruby `ensure` blocks still run. `cancelled?` returns a boolean if the
+tool prefers to stop its loop explicitly.
+
+Checks probe the response stream with an empty write, which sends no MCP
+message. A failed stream write is treated as cancellation; repeated checks
+remember it without retrying the stream. Checks use the stream's backpressure,
+so a slow reader can delay them. Cancellation is cooperative: it does not
+interrupt a running external call or a CPU loop that never checks. Place checks
+before side effects and after external calls. A client disconnect also stops a
+progress-enabled tool at its next failed progress write.
+
+Combine `enable :cancellation, :progress` to report progress too. The progress
+helper still requires a client-supplied `progressToken`. The supported legacy
+HTTP requests use the same stream checks. This implementation handles response
+stream disconnection; it does not track requests across connections or process
+separate `notifications/cancelled` messages.
+
 The app responds on `POST /mcp`. It uses the 2026-07-28 MCP protocol and accepts
 legacy 2025-03-26, 2025-06-18, and 2025-11-25 Streamable HTTP handshakes. It
-returns JSON responses unless a declared tool reports progress; subscriptions
-are not implemented. By default,
+returns JSON responses unless a tool enables cancellation or reports progress.
+Subscriptions are not implemented. By default,
 only `localhost` and `127.0.0.1` Host headers are accepted. Set
 `MCP_ALLOWED_HOSTS` to a comma-separated list for other hosts.
 
@@ -100,3 +143,14 @@ ruby test/pavement_progress.rb
 ```
 
 GitHub Actions runs these tests and checks Ruby syntax on Ruby 4.0.
+
+To test cancellation with the actual Wasm runtime, build the
+[`hello-worker`](examples/hello-worker) example, then run from the repository root:
+
+```sh
+node test/pavement_cancellation.mjs
+```
+
+This test cancels response readers and aborts requests, verifies that later
+work is skipped and cleanup runs, and checks successful completion on an open
+stream. It uses local stand-ins for external HTTP services.
