@@ -1,0 +1,22 @@
+---
+mruby:
+  version: 4.0.0
+  release_no: 40000
+  git_commit: 65b7ae6256faa2e53aa0cf8249c8ad5f1cd86327
+builds:
+  worker:
+    https://github.com/udzura/mruby-rack.git:
+      url: https://github.com/udzura/mruby-rack.git
+      branch: master
+      commit: afd805f1991b46639ce1fbb778820fe586155bc2
+      version: 0.1.0
+    https://github.com/udzura/picoruby-cloudflare-worker-wasm.git:
+      url: https://github.com/udzura/picoruby-cloudflare-worker-wasm.git
+      branch: master
+      commit: f3ac8d1b20e92c9062c22b086450738450950d63
+      version: 0.0.0
+    https://github.com/udzura/mruby-jsonrs.git:
+      url: https://github.com/udzura/mruby-jsonrs.git
+      branch: master
+      commit: c08199bbd3a0bece122ea1b567b027190be29af3
+      version: 0.1.0

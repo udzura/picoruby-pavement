@@ -1,0 +1,5 @@
+.bundle/
+.picoruby-build/
+.wrangler/
+generated/
+node_modules/
